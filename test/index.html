@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shyawn Runner</title>
+    <style>
+      * { padding: 0; margin: 0; }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        height: 100vh;
+        user-select: none;
+        touch-action: none;
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        -moz-user-select: none;
+        -ms-user-select: none;
+        outline: none;
+        -webkit-tap-highlight-color: rgba(255,255,255,0);
+      }
+      canvas { border: 0.1px solid grey; }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <script>
+// All images embedded as base64 data URIs so the file works when opened
+// directly from disk (avoids ES module CORS restrictions on file://).
+//
+// Image name mapping (original -> new):
+//   standing_still.png -> still.png       (player idle / airborne)
+//   dino_run1.png      -> shyawn.png      (player run frame 1)
+//   dino_run2.png      -> shyawn_run2.png (player run frame 2)
+//   cactus_1.png       -> matt1.png       (obstacle type 1)
+//   cactus_2.png       -> matt2.png       (obstacle type 2)
+//   cactus_3.png       -> matt3.png       (obstacle type 3)
+
+const IMAGES = {
+  still: "still.png",
+  shyawn: "shyawn.png",
+  matt1: "matt1.png",
+  matt2: "matt2.png",
+  matt3: "matt3.png",
+  ground: "ground.png",
+  shyawn_run2: "hammy.png",
+};
+
+// ── Ground ────────────────────────────────────────────────────────────────────
+class Ground {
+  constructor(ctx, width, height, speed, scaleRatio) {
+    this.ctx = ctx; this.canvas = ctx.canvas;
+    this.width = width; this.height = height;
+    this.speed = speed; this.scaleRatio = scaleRatio;
+    this.x = 0;
+    this.y = this.canvas.height - this.height;
+    this.groundImage = new Image();
+    this.groundImage.src = IMAGES.ground;
+  }
+  update(gameSpeed, frameTimeDelta) {
+    this.x -= gameSpeed * frameTimeDelta * this.speed * this.scaleRatio;
+  }
+  draw() {
+    this.ctx.drawImage(this.groundImage, this.x,              this.y, this.width, this.height);
+    this.ctx.drawImage(this.groundImage, this.x + this.width, this.y, this.width, this.height);
+    if (this.x < -this.width) this.x = 0;
+  }
+  reset() { this.x = 0; }
+}
+
+// ── Obstacle ──────────────────────────────────────────────────────────────────
+class Obstacle {
+  constructor(ctx, x, y, width, height, image) {
+    this.ctx = ctx; this.x = x; this.y = y;
+    this.width = width; this.height = height; this.image = image;
+  }
+  update(speed, gameSpeed, frameTimeDelta, scaleRatio) {
+    this.x -= speed * gameSpeed * frameTimeDelta * scaleRatio;
+  }
+  draw() {
+    this.ctx.drawImage(this.image, this.x, this.y, this.width, this.height);
+  }
+  // AABB collision with forgiveness factor so near-misses feel fair
+  collideWith(sprite) {
+    const adj = 1.4;
+    return (
+      sprite.x < this.x + this.width  / adj &&
+      sprite.x + sprite.width  / adj > this.x &&
+      sprite.y < this.y + this.height / adj &&
+      sprite.height + sprite.y / adj > this.y
+    );
+  }
+}
+
+// ── ObstacleController ────────────────────────────────────────────────────────
+class ObstacleController {
+  INTERVAL_MIN = 500;
+  INTERVAL_MAX = 2000;
+  obstacles    = [];
+  nextInterval = null;
+
+  constructor(ctx, obstacleImages, scaleRatio, speed) {
+    this.ctx = ctx; this.canvas = ctx.canvas;
+    this.obstacleImages = obstacleImages;
+    this.scaleRatio = scaleRatio; this.speed = speed;
+    this.setNextInterval();
+  }
+  rand(min, max) { return Math.floor(Math.random() * (max - min + 1) + min); }
+  setNextInterval() { this.nextInterval = this.rand(this.INTERVAL_MIN, this.INTERVAL_MAX); }
+  spawn() {
+    const cfg = this.obstacleImages[this.rand(0, this.obstacleImages.length - 1)];
+    this.obstacles.push(
+      new Obstacle(this.ctx, this.canvas.width * 1.5,
+        this.canvas.height - cfg.height, cfg.width, cfg.height, cfg.image)
+    );
+  }
+  update(gameSpeed, dt) {
+    if (this.nextInterval <= 0) { this.spawn(); this.setNextInterval(); }
+    this.nextInterval -= dt;
+    this.obstacles.forEach(o => o.update(this.speed, gameSpeed, dt, this.scaleRatio));
+    this.obstacles = this.obstacles.filter(o => o.x > -o.width);
+  }
+  draw()              { this.obstacles.forEach(o => o.draw()); }
+  collideWith(sprite) { return this.obstacles.some(o => o.collideWith(sprite)); }
+  reset()             { this.obstacles = []; }
+}
+
+// ── Player ────────────────────────────────────────────────────────────────────
+class Player {
+  WALK_TIMER  = 500;   // ms between animation frame flips
+  walkTimer   = 500;
+  runImages   = [];    // [shyawn frame 1, shyawn frame 2]
+  jumpPressed = false;
+  jumping     = false;
+  falling     = false;
+  JUMP_SPEED  = 0.7;
+  GRAVITY     = 0.5;
+
+  constructor(ctx, width, height, minJump, maxJump, scaleRatio) {
+    this.ctx = ctx; this.canvas = ctx.canvas;
+    this.width = width; this.height = height;
+    this.minJump = minJump; this.maxJump = maxJump;
+    this.scaleRatio = scaleRatio;
+
+    this.x       = 10 * scaleRatio;
+    this.y       = this.canvas.height - this.height - 1.5 * scaleRatio;
+    this.groundY = this.y;
+
+    // still.png — idle/airborne pose (was standing_still.png)
+    this.stillImage     = new Image();
+    this.stillImage.src = IMAGES.still;
+    this.image = this.stillImage;
+
+    // Run frames (were dino_run1.png / dino_run2.png)
+    const r1 = new Image(); r1.src = IMAGES.shyawn;
+    const r2 = new Image(); r2.src = IMAGES.shyawn_run2;
+    this.runImages.push(r1, r2);
+
+    // Keyboard input
+    window.removeEventListener("keydown", this._kd);
+    window.removeEventListener("keyup",   this._ku);
+    window.addEventListener("keydown", this._kd = e => { if (e.code === "Space") this.jumpPressed = true;  });
+    window.addEventListener("keyup",   this._ku = e => { if (e.code === "Space") this.jumpPressed = false; });
+  }
+
+  update(gameSpeed, dt) {
+    // Cycle run frames while on the ground
+    if (this.walkTimer <= 0) {
+      this.image    = (this.image === this.runImages[0]) ? this.runImages[1] : this.runImages[0];
+      this.walkTimer = this.WALK_TIMER;
+    }
+    this.walkTimer -= dt * gameSpeed;
+
+    // Show idle sprite while in the air
+    if (this.jumping) this.image = this.stillImage;
+
+    // Jump logic
+    if (this.jumpPressed) this.jumping = true;
+
+    if (this.jumping && !this.falling) {
+      if (
+        this.y > this.canvas.height - this.minJump ||
+        (this.y > this.canvas.height - this.maxJump && this.jumpPressed)
+      ) {
+        this.y -= this.JUMP_SPEED * dt * this.scaleRatio;
+      } else {
+        this.falling = true;
+      }
+    } else {
+      if (this.y < this.groundY) {
+        this.y += this.GRAVITY * dt * this.scaleRatio;
+        if (this.y + this.height > this.canvas.height) this.y = this.groundY;
+      } else {
+        this.falling = false;
+        this.jumping = false;
+      }
+    }
+  }
+
+  draw() { this.ctx.drawImage(this.image, this.x, this.y, this.width, this.height); }
+}
+
+// ── Score ─────────────────────────────────────────────────────────────────────
+class Score {
+  score  = 0;
+  HS_KEY = "shyawnHighScore";
+
+  constructor(ctx, scaleRatio) {
+    this.ctx = ctx; this.canvas = ctx.canvas; this.scaleRatio = scaleRatio;
+  }
+  update(dt)  { this.score += dt * 0.01; }
+  reset()     { this.score  = 0; }
+  setHighScore() {
+    const hs = Number(localStorage.getItem(this.HS_KEY));
+    if (this.score > hs) localStorage.setItem(this.HS_KEY, Math.floor(this.score));
+  }
+  draw() {
+    const hs = Number(localStorage.getItem(this.HS_KEY));
+    const fs = 20 * this.scaleRatio;
+    const y  = 20 * this.scaleRatio;
+    this.ctx.font      = `${fs}px serif`;
+    this.ctx.fillStyle = "#525250";
+    const scoreX = this.canvas.width - 75  * this.scaleRatio;
+    const hsX    = scoreX            - 125 * this.scaleRatio;
+    this.ctx.fillText(Math.floor(this.score).toString().padStart(6, "0"), scoreX, y);
+    this.ctx.fillText(`HI ${hs.toString().padStart(6, "0")}`, hsX, y);
+  }
+}
+
+// ── Game setup ────────────────────────────────────────────────────────────────
+const canvas = document.getElementById("game");
+const ctx    = canvas.getContext("2d");
+
+const GAME_WIDTH  = 800;
+const GAME_HEIGHT = 300;
+const PLAYER_W    = 90 / 1.5;   // matches original dino dimensions 88 x 94
+const PLAYER_H    = 130 / 1.5;
+const MAX_JUMP    = GAME_HEIGHT;
+const MIN_JUMP    = 250;
+const GROUND_W    = 2400;
+const GROUND_H    = 24;
+const GND_SPEED   = 0.4;
+
+// Obstacle sizes
+const OBSTACLE_CONFIG = [
+  { key: "matt1", w: 100 / 1.5, h: 140 / 1.5 },  // was cactus_1 (48×100)
+  { key: "matt2", w: 120 / 1.5, h: 150 / 1.5 },  // was cactus_2 (98×100)
+  { key: "matt3", w: 120 / 1.5, h:  140 / 1.5 },  // was cactus_3 (68×70)
+];
+
+const SPEED_START     = 1;
+const SPEED_INCREMENT = 0.00001;
+
+let player, ground, obstacles, score;
+let scaleRatio, prevTime = null;
+let gameSpeed = SPEED_START;
+let gameOver  = false;
+let waiting   = true;
+let restartReady = false;
+
+function getScaleRatio() {
+  const sw = Math.min(window.innerWidth,  document.documentElement.clientWidth);
+  const sh = Math.min(window.innerHeight, document.documentElement.clientHeight);
+  return (sw / sh < GAME_WIDTH / GAME_HEIGHT) ? sw / GAME_WIDTH : sh / GAME_HEIGHT;
+}
+
+function createSprites() {
+  scaleRatio    = getScaleRatio();
+  canvas.width  = GAME_WIDTH  * scaleRatio;
+  canvas.height = GAME_HEIGHT * scaleRatio;
+
+  player = new Player(
+    ctx,
+    PLAYER_W * scaleRatio, PLAYER_H * scaleRatio,
+    MIN_JUMP * scaleRatio, MAX_JUMP * scaleRatio,
+    scaleRatio
+  );
+
+  ground = new Ground(ctx, GROUND_W * scaleRatio, GROUND_H * scaleRatio, GND_SPEED, scaleRatio);
+
+  const obstacleImages = OBSTACLE_CONFIG.map(cfg => {
+    const img = new Image();
+    img.src   = IMAGES[cfg.key];
+    return { image: img, width: cfg.w * scaleRatio, height: cfg.h * scaleRatio };
+  });
+
+  obstacles = new ObstacleController(ctx, obstacleImages, scaleRatio, GND_SPEED);
+  score     = new Score(ctx, scaleRatio);
+}
+
+function reset() {
+  restartReady = false;
+  gameOver     = false;
+  waiting      = false;
+  ground.reset();
+  obstacles.reset();
+  score.reset();
+  gameSpeed = SPEED_START;
+}
+
+function setupReset() {
+  if (!restartReady) {
+    restartReady = true;
+    setTimeout(() => {
+      window.addEventListener("keyup",      reset, { once: true });
+      window.addEventListener("touchstart", reset, { once: true });
+    }, 1000);
+  }
+}
+
+// ── Game loop ─────────────────────────────────────────────────────────────────
+function gameLoop(now) {
+  if (prevTime === null) { prevTime = now; requestAnimationFrame(gameLoop); return; }
+  const dt = now - prevTime;
+  prevTime  = now;
+
+  // Clear to white each frame
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (!gameOver && !waiting) {
+    ground.update(gameSpeed, dt);
+    obstacles.update(gameSpeed, dt);
+    player.update(gameSpeed, dt);
+    score.update(dt);
+    gameSpeed += dt * SPEED_INCREMENT;
+  }
+
+  if (!gameOver && obstacles.collideWith(player)) {
+    gameOver = true;
+    score.setHighScore();
+    setupReset();
+  }
+
+  ground.draw();
+  obstacles.draw();
+  player.draw();
+  score.draw();
+
+  if (gameOver) {
+    ctx.font      = `${70 * scaleRatio}px Verdana`;
+    ctx.fillStyle = "grey";
+    ctx.fillText("GAME OVER", canvas.width / 4.5, canvas.height / 2);
+  }
+
+  if (waiting) {
+    ctx.font      = `${40 * scaleRatio}px Verdana`;
+    ctx.fillStyle = "grey";
+    ctx.fillText("Tap Screen or Press Space To Start", canvas.width / 14, canvas.height / 2);
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+createSprites();
+window.addEventListener("resize", () => setTimeout(createSprites, 500));
+if (screen.orientation) screen.orientation.addEventListener("change", createSprites);
+
+requestAnimationFrame(gameLoop);
+// First keypress/tap starts the game
+window.addEventListener("keyup",      reset, { once: true });
+    </script>
+  </body>
+</html>
