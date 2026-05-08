@@ -4,7 +4,7 @@ import Cactus from "./Cactus.js";
 // instead of cacti, but logic and hitboxes are identical to the original).
 export default class CactiController {
   // Interval (ms) between spawning consecutive obstacles
-  CACTUS_INTERVAL_MIN = 500;
+  CACTUS_INTERVAL_MIN = 600;
   CACTUS_INTERVAL_MAX = 2000;
 
   nextCactusInterval = null;
