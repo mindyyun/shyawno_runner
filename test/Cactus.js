@@ -23,7 +23,7 @@ export default class Cactus {
   // so the boxes are slightly smaller than the visible sprites, keeping
   // collisions fair-feeling for the player.
   collideWith(sprite) {
-    const adjustBy = 0.4;   // >1 means smaller boxes, more forgiveness
+    const adjustBy = 0.3;   // >1 means smaller boxes, more forgiveness
     if (
       sprite.x < this.x + this.width  / adjustBy &&
       sprite.x + sprite.width  / adjustBy > this.x &&

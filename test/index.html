@@ -236,7 +236,7 @@ const ctx    = canvas.getContext("2d");
 
 const GAME_WIDTH  = 800;
 const GAME_HEIGHT = 300;
-const PLAYER_W    = 90 / 1.5;   // matches original dino dimensions 88 x 94
+const PLAYER_W    = 100 / 1.5;   // matches original dino dimensions 88 x 94
 const PLAYER_H    = 130 / 1.5;
 const MAX_JUMP    = GAME_HEIGHT;
 const MIN_JUMP    = 275;
@@ -246,9 +246,10 @@ const GND_SPEED   = 0.4;
 
 // Obstacle sizes
 const OBSTACLE_CONFIG = [
-  { key: "matt1", w: 140 / 1.5, h: 170 / 1.5 },  // was cactus_1 (48×100)
+  { key: "matt1", w: 120 / 1.5, h: 150 / 1.5 },  // was cactus_1 (48×100)
   { key: "matt2", w: 130 / 1.5, h: 160 / 1.5 },  // was cactus_2 (98×100)
   { key: "matt3", w: 120 / 1.5, h:  160 / 1.5 },  // was cactus_3 (68×70)
+  {key: "justin", w: 80 / 1.5, h:  110 / 1.5 }
 ];
 
 const SPEED_START     = 1;

@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shyawn Runner</title>
+    <style>
+      * { padding: 0; margin: 0; box-sizing: border-box; }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        height: 100vh;
+        background: #1a1a1a;
+        user-select: none;
+        touch-action: none;
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        -moz-user-select: none;
+        -ms-user-select: none;
+        outline: none;
+        -webkit-tap-highlight-color: rgba(255,255,255,0);
+      }
+      #game-wrapper { position: relative; display: inline-block; }
+      canvas#game   { border: 0.1px solid grey; display: block; }
+
+      /* hidden canvas used for motion detection — never shown */
+      #motion-canvas { display: none; }
+
+      /* ── Camera preview ─────────────────────────────────── */
+      #cam-box {
+        position: absolute;
+        top: 10px; left: 10px;
+        width: 160px; height: 120px;
+        border-radius: 10px;
+        overflow: hidden;
+        border: 2px solid rgba(255,255,255,0.35);
+        box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        background: #000;
+        z-index: 10;
+      }
+      #cam-video {
+        width: 100%; height: 100%;
+        object-fit: cover;
+        transform: scaleX(-1);
+        opacity: 0.92;
+      }
+      #cam-box.clap-flash        { border-color: #ffdd00; box-shadow: 0 0 20px 5px rgba(255,220,0,0.9); }
+      #cam-box.double-clap-flash { border-color: #ff4400; box-shadow: 0 0 26px 7px rgba(255,68,0,0.95); }
+
+      /* ── Status badge ───────────────────────────────────── */
+      #clap-status {
+        position: absolute;
+        top: 134px; left: 10px;
+        font-family: 'Courier New', monospace;
+        font-size: 11px;
+        color: rgba(255,255,255,0.85);
+        background: rgba(0,0,0,0.65);
+        padding: 3px 7px;
+        border-radius: 5px;
+        z-index: 10;
+        pointer-events: none;
+        white-space: nowrap;
+      }
+
+      /* ── Loading overlay ────────────────────────────────── */
+      #cam-overlay {
+        position: absolute;
+        top: 10px; left: 10px;
+        width: 160px; height: 120px;
+        border-radius: 10px;
+        background: rgba(0,0,0,0.82);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        color: #fff;
+        font-family: 'Courier New', monospace;
+        font-size: 11px;
+        text-align: center;
+        z-index: 11;
+        padding: 8px;
+        gap: 6px;
+        border: 2px solid rgba(255,255,255,0.2);
+      }
+      #cam-overlay .spinner {
+        width: 24px; height: 24px;
+        border: 3px solid rgba(255,255,255,0.2);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      #cam-overlay.hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="game-wrapper">
+      <canvas id="game"></canvas>
+      <canvas id="motion-canvas" width="80" height="60"></canvas>
+
+      <div id="cam-box">
+        <video id="cam-video" autoplay playsinline muted></video>
+      </div>
+      <div id="cam-overlay">
+        <div class="spinner"></div>
+        <span>Starting<br>camera…</span>
+      </div>
+      <div id="clap-status">👏 Clap to jump</div>
+    </div>
+
+    <script>
+// =============================================================================
+// IMAGE PATHS
+// =============================================================================
+const IMAGES = {
+  still:       "still.png",
+  shyawn:      "shyawn.png",
+  shyawn_run2: "hammy.png",
+  matt1:       "matt1.png",
+  matt2:       "matt2.png",
+  matt3:       "justin.png",
+  ground:      "ground.png",
+};
+
+// =============================================================================
+// GROUND
+// =============================================================================
+class Ground {
+  constructor(ctx, width, height, speed, scaleRatio) {
+    this.ctx = ctx; this.canvas = ctx.canvas;
+    this.width = width; this.height = height;
+    this.speed = speed; this.scaleRatio = scaleRatio;
+    this.x = 0;
+    this.y = this.canvas.height - this.height;
+    this.groundImage = new Image();
+    this.groundImage.src = IMAGES.ground;
+  }
+  update(gameSpeed, dt) {
+    this.x -= gameSpeed * dt * this.speed * this.scaleRatio;
+  }
+  draw() {
+    this.ctx.drawImage(this.groundImage, this.x,              this.y, this.width, this.height);
+    this.ctx.drawImage(this.groundImage, this.x + this.width, this.y, this.width, this.height);
+    if (this.x < -this.width) this.x = 0;
+  }
+  reset() { this.x = 0; }
+}
+
+// =============================================================================
+// OBSTACLE
+// =============================================================================
+class Obstacle {
+  constructor(ctx, x, y, width, height, image) {
+    this.ctx = ctx; this.x = x; this.y = y;
+    this.width = width; this.height = height; this.image = image;
+  }
+  update(speed, gameSpeed, dt, scaleRatio) {
+    this.x -= speed * gameSpeed * dt * scaleRatio;
+  }
+  draw() { this.ctx.drawImage(this.image, this.x, this.y, this.width, this.height); }
+  collideWith(sprite) {
+  const adj = 1.4;
+  return (
+    sprite.x                    < this.x + this.width  / adj &&
+    sprite.x + sprite.width / adj > this.x                   &&
+    sprite.y                    < this.y + this.height / adj &&
+    sprite.y + sprite.height / adj > this.y                    // ← fixed
+  );
+  }
+}
+
+// =============================================================================
+// OBSTACLE CONTROLLER
+// =============================================================================
+class ObstacleController {
+  INTERVAL_MIN = 1000; INTERVAL_MAX = 2500;
+  obstacles = []; nextInterval = null;
+
+  constructor(ctx, obstacleImages, scaleRatio, speed) {
+    this.ctx = ctx; this.canvas = ctx.canvas;
+    this.obstacleImages = obstacleImages;
+    this.scaleRatio = scaleRatio; this.speed = speed;
+    this.setNextInterval();
+  }
+  rand(min, max) { return Math.floor(Math.random() * (max - min + 1) + min); }
+  setNextInterval() { this.nextInterval = this.rand(this.INTERVAL_MIN, this.INTERVAL_MAX); }
+  spawn() {
+    const cfg = this.obstacleImages[this.rand(0, this.obstacleImages.length - 1)];
+    this.obstacles.push(new Obstacle(
+      this.ctx, this.canvas.width * 1.5,
+      this.canvas.height - cfg.height,
+      cfg.width, cfg.height, cfg.image
+    ));
+  }
+  update(gameSpeed, dt) {
+    if (this.nextInterval <= 0) { this.spawn(); this.setNextInterval(); }
+    this.nextInterval -= dt;
+    this.obstacles.forEach(o => o.update(this.speed, gameSpeed, dt, this.scaleRatio));
+    this.obstacles = this.obstacles.filter(o => o.x > -o.width);
+  }
+  draw()              { this.obstacles.forEach(o => o.draw()); }
+  collideWith(sprite) { return this.obstacles.some(o => o.collideWith(sprite)); }
+  reset()             { this.obstacles = []; }
+}
+
+// =============================================================================
+// PLAYER
+// Fix: image starts as runImages[0] — never stillImage.
+//      stillImage only shown while jumping===true.
+//      On game-over, player.update is NOT called so image stays frozen.
+//      r2 falls back to r1 if hammy.png is missing.
+// =============================================================================
+class Player {
+  WALK_TIMER  = 200;
+  walkTimer   = 200;
+  runImages   = [];
+  jumping     = false;
+  falling     = false;
+  jumpPressed = false;
+  JUMP_SPEED  = 0.9;
+  GRAVITY     = 0.4;
+  jumpsUsed   = 0;
+  MAX_JUMPS   = 2;
+
+  constructor(ctx, width, height, minJump, maxJump, scaleRatio) {
+    this.ctx = ctx; this.canvas = ctx.canvas;
+    this.width = width; this.height = height;
+    this.minJump = minJump; this.maxJump = maxJump;
+    this.scaleRatio = scaleRatio;
+
+    this.x       = 10 * scaleRatio;
+    this.y       = this.canvas.height - this.height - 1.5 * scaleRatio;
+    this.groundY = this.y;
+
+    this.stillImage = null; // will be set once loaded; falls back to runImages[0] if missing
+
+    const r1 = new Image();
+    r1.src = IMAGES.shyawn;
+
+    const r2 = new Image();
+    this.runImages = [r1, r2];
+    r2.onerror = () => { this.runImages[1] = this.runImages[0]; };
+    r2.src = IMAGES.shyawn_run2;
+
+    // Load still separately; if it fails we just use runImages[0] for airborne too
+    const still = new Image();
+    still.onload = () => { this.stillImage = still; };
+    still.src = IMAGES.still;
+
+    this.image = this.runImages[0];
+
+    // Space bar fallback
+    this._kd = e => { if (e.code === "Space") this.triggerJump(); };
+    window.removeEventListener("keydown", this._kd);
+    window.addEventListener("keydown", this._kd);
+  }
+
+  triggerJump() {
+    if (this.jumpsUsed < this.MAX_JUMPS) {
+      this.jumpsUsed++;
+      this.jumping     = true;
+      this.falling     = false;
+      this.jumpPressed = true;
+      clearTimeout(this._rel);
+      this._rel = setTimeout(() => { this.jumpPressed = false; }, 220);
+    }
+  }
+
+  update(gameSpeed, dt) {
+  if (!this.jumping) {
+    this.walkTimer -= dt * gameSpeed;
+    if (this.walkTimer <= 0) {
+      this.image     = (this.image === this.runImages[0]) ? this.runImages[1] : this.runImages[0];
+      this.walkTimer = this.WALK_TIMER;
+    }
+  } else {
+    // Airborne sprite
+    this.image = (this.stillImage && this.stillImage.complete && this.stillImage.naturalWidth > 0)
+      ? this.stillImage
+      : this.runImages[0];
+  }
+
+  if (this.jumping && !this.falling) {
+  if (
+    this.y > this.canvas.height - this.minJump ||
+    (this.y > this.canvas.height - this.maxJump && this.jumpPressed)
+  ) {
+    this.y -= this.JUMP_SPEED * dt * this.scaleRatio;
+    if (this.y < 0) {          // ← add this clamp
+      this.y = 0;
+      this.falling = true;     // immediately start falling back down
+    }
+  } else {
+    this.falling = true;
+  }
+  } else {
+    if (this.y < this.groundY) {
+      this.y += this.GRAVITY * dt * this.scaleRatio;
+      if (this.y + this.height > this.canvas.height) this.y = this.groundY;
+    } else {
+      this.falling   = false;
+      this.jumping   = false;
+      this.jumpsUsed = 0;
+      // Always reset to run frame on landing — no conditional
+      this.image     = this.runImages[0];
+      this.walkTimer = this.WALK_TIMER;
+    }
+  }
+}
+
+  draw() {
+    const safe = (img) => img && img.complete && img.naturalWidth > 0;
+    const img  = safe(this.image) ? this.image : this.runImages[0];
+    // runImages[0] may also not be loaded on very first frame — skip draw rather than throw
+    if (safe(img)) this.ctx.drawImage(img, this.x, this.y, this.width, this.height);
+  }
+}
+
+// =============================================================================
+// SCORE
+// =============================================================================
+class Score {
+  score  = 0;
+  HS_KEY = "shyawnHighScore";
+
+  constructor(ctx, scaleRatio) {
+    this.ctx = ctx; this.canvas = ctx.canvas; this.scaleRatio = scaleRatio;
+  }
+  update(dt)  { this.score += dt * 0.01; }
+  reset()     { this.score  = 0; }
+  setHighScore() {
+    const hs = Number(localStorage.getItem(this.HS_KEY));
+    if (this.score > hs) localStorage.setItem(this.HS_KEY, Math.floor(this.score));
+  }
+  draw() {
+    const hs     = Number(localStorage.getItem(this.HS_KEY));
+    const fs     = 20 * this.scaleRatio;
+    const y      = 20 * this.scaleRatio;
+    const scoreX = this.canvas.width - 75  * this.scaleRatio;
+    const hsX    = scoreX            - 125 * this.scaleRatio;
+    this.ctx.font      = `${fs}px serif`;
+    this.ctx.fillStyle = "#525250";
+    this.ctx.fillText(Math.floor(this.score).toString().padStart(6, "0"), scoreX, y);
+    this.ctx.fillText(`HI ${hs.toString().padStart(6, "0")}`, hsX, y);
+  }
+}
+
+// =============================================================================
+// CLAP DETECTOR — pure motion detection, no ML library needed
+//
+// How it works:
+//   Every 50ms, the camera feed is drawn into a tiny 80×60 canvas.
+//   We compare each pixel's brightness to the previous frame.
+//   If enough pixels changed significantly (DIFF_THRESHOLD), that's motion.
+//   A clap = a sudden large motion burst AFTER a period of low motion.
+//   (hands go apart = calm, hands slam together = big motion spike)
+//
+//   MOTION_THRESHOLD  : fraction of pixels that must change to count as motion
+//   SPIKE_MULTIPLIER  : current motion must be this many times the recent avg
+//   COOLDOWN_MS       : min time between claps
+//   DOUBLE_WINDOW_MS  : two spikes this close = double clap
+// =============================================================================
+class ClapDetector {
+  MOTION_THRESHOLD = 0.08;   // 8% of pixels changed = motion frame
+  SPIKE_MULTIPLIER = 2.5;    // spike must be 2.5x recent average to trigger
+  COOLDOWN_MS      = 400;
+  DOUBLE_WINDOW_MS = 700;
+  SAMPLE_INTERVAL  = 50;     // ms between frames sampled (20fps)
+  HISTORY_LEN      = 6;      // frames of history to compute rolling average
+
+  constructor(videoEl, onClap, onDoubleClap) {
+    this.video        = videoEl;
+    this.onClap       = onClap;
+    this.onDoubleClap = onDoubleClap;
+
+    this.motionCanvas = document.getElementById("motion-canvas");
+    this.motionCtx    = this.motionCanvas.getContext("2d", { willReadFrequently: true });
+    this.W = this.motionCanvas.width;   // 80
+    this.H = this.motionCanvas.height;  // 60
+
+    this.prevPixels   = null;
+    this.motionHistory = [];
+    this.lastClapAt   = 0;
+    this.lastSingleAt = 0;
+    this.prevWasLow   = false;
+    this.warmup       = true; // ignore motion during camera startup
+
+    this._start();
+  }
+
+  async _start() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: 320, height: 240 }
+      });
+      this.video.srcObject = stream;
+      await this.video.play();
+
+      document.getElementById("cam-overlay").classList.add("hidden");
+      document.getElementById("clap-status").textContent =
+        "👏 Clap to jump  |  👏👏 Double clap = double jump";
+
+      // Ignore motion for 1.5s while camera exposure/white-balance settles
+      setTimeout(() => { this.warmup = false; }, 1500);
+
+      // Sample camera at SAMPLE_INTERVAL using setInterval (reliable timing)
+      setInterval(() => this._sample(), this.SAMPLE_INTERVAL);
+
+    } catch (err) {
+      document.getElementById("cam-overlay").innerHTML =
+        `<span style="color:#ff8080">Camera denied.<br>Use Space to jump.</span>`;
+      document.getElementById("clap-status").textContent = "⌨️ Space to jump";
+    }
+  }
+
+  _sample() {
+    if (this.video.readyState < 2) return;
+
+    // Draw current frame into tiny canvas
+    this.motionCtx.drawImage(this.video, 0, 0, this.W, this.H);
+    const data = this.motionCtx.getImageData(0, 0, this.W, this.H).data;
+
+    if (!this.prevPixels) {
+      this.prevPixels = data.slice();
+      return;
+    }
+
+    // Count changed pixels (compare brightness only)
+    let changed = 0;
+    const total = this.W * this.H;
+    for (let i = 0; i < data.length; i += 4) {
+      const curBright  = (data[i] + data[i+1] + data[i+2]) / 3;
+      const prevBright = (this.prevPixels[i] + this.prevPixels[i+1] + this.prevPixels[i+2]) / 3;
+      if (Math.abs(curBright - prevBright) > 25) changed++;
+    }
+    this.prevPixels = data.slice();
+
+    const motionLevel = changed / total; // 0.0 – 1.0
+
+    // Rolling average of recent frames
+    this.motionHistory.push(motionLevel);
+    if (this.motionHistory.length > this.HISTORY_LEN) this.motionHistory.shift();
+    const avg = this.motionHistory.reduce((a, b) => a + b, 0) / this.motionHistory.length;
+
+    const now   = performance.now();
+    const isHigh = motionLevel > this.MOTION_THRESHOLD &&
+                   motionLevel > avg * this.SPIKE_MULTIPLIER;
+    const isLow  = motionLevel < this.MOTION_THRESHOLD * 0.5;
+
+    // Fire on the rising edge of a spike that follows a calm period
+    if (!this.warmup && isHigh && this.prevWasLow) {
+      if (now - this.lastClapAt > this.COOLDOWN_MS) {
+        this.lastClapAt = now;
+
+        if (now - this.lastSingleAt < this.DOUBLE_WINDOW_MS) {
+          this.lastSingleAt = 0;
+          this.onDoubleClap();
+          this._flash("double");
+          this._status("👏👏 DOUBLE JUMP!");
+        } else {
+          this.lastSingleAt = now;
+          this.onClap();
+          this._flash("single");
+          this._status("👏 JUMP!");
+        }
+      }
+    }
+
+    if (isLow)  this.prevWasLow = true;
+    if (isHigh) this.prevWasLow = false;
+  }
+
+  _flash(type) {
+    const box = document.getElementById("cam-box");
+    box.classList.remove("clap-flash", "double-clap-flash");
+    box.classList.add(type === "double" ? "double-clap-flash" : "clap-flash");
+    clearTimeout(this._ft);
+    this._ft = setTimeout(() => box.classList.remove("clap-flash", "double-clap-flash"), 250);
+  }
+
+  _status(msg) {
+    document.getElementById("clap-status").textContent = msg;
+    clearTimeout(this._st);
+    this._st = setTimeout(() => {
+      document.getElementById("clap-status").textContent =
+        "👏 Clap to jump  |  👏👏 Double clap = double jump";
+    }, 600);
+  }
+}
+
+// =============================================================================
+// GAME SETUP
+// =============================================================================
+const canvas = document.getElementById("game");
+const ctx    = canvas.getContext("2d");
+
+const GAME_WIDTH  = 800;
+const GAME_HEIGHT = 300;
+const PLAYER_W    = 100 / 1.5;
+const PLAYER_H    = 130 / 1.5;
+const MAX_JUMP    = GAME_HEIGHT;
+const MIN_JUMP    = 275;
+const GROUND_W    = 2400;
+const GROUND_H    = 24;
+const GND_SPEED   = 0.4;
+
+const OBSTACLE_CONFIG = [
+  { key: "matt1",  w: 120 / 1.5, h: 150 / 1.5 },
+  { key: "matt2",  w: 130 / 1.5, h: 160 / 1.5 },
+  { key: "matt3",  w: 120 / 1.5, h: 160 / 1.5 },
+  { key: "justin", w:  80 / 1.5, h: 110 / 1.5 },
+];
+
+const SPEED_START     = 1;
+const SPEED_INCREMENT = 0.00001;
+
+let player, ground, obstacles, score;
+let scaleRatio, prevTime = null;
+let gameSpeed    = SPEED_START;
+let gameOver     = false;
+let waiting      = true;
+let restartReady = false;
+
+function getScaleRatio() {
+  const sw = Math.min(window.innerWidth,  document.documentElement.clientWidth);
+  const sh = Math.min(window.innerHeight, document.documentElement.clientHeight);
+  return (sw / sh < GAME_WIDTH / GAME_HEIGHT) ? sw / GAME_WIDTH : sh / GAME_HEIGHT;
+}
+
+function createSprites() {
+  scaleRatio    = getScaleRatio();
+  canvas.width  = GAME_WIDTH  * scaleRatio;
+  canvas.height = GAME_HEIGHT * scaleRatio;
+
+  player = new Player(
+    ctx,
+    PLAYER_W * scaleRatio, PLAYER_H * scaleRatio,
+    MIN_JUMP * scaleRatio, MAX_JUMP * scaleRatio,
+    scaleRatio
+  );
+  ground = new Ground(ctx, GROUND_W * scaleRatio, GROUND_H * scaleRatio, GND_SPEED, scaleRatio);
+
+  const obstacleImages = OBSTACLE_CONFIG.map(cfg => {
+    const img = new Image(); img.src = IMAGES[cfg.key];
+    return { image: img, width: cfg.w * scaleRatio, height: cfg.h * scaleRatio };
+  });
+  obstacles = new ObstacleController(ctx, obstacleImages, scaleRatio, GND_SPEED);
+  score     = new Score(ctx, scaleRatio);
+}
+
+function reset() {
+  restartReady = false;
+  gameOver     = false;
+  waiting      = false;
+  ground.reset();
+  obstacles.reset();
+  score.reset();
+  gameSpeed    = SPEED_START;
+  // Reset player image to a run frame so it's never stuck on stillImage after restart
+  player.jumping   = false;
+  player.falling   = false;
+  player.jumpsUsed = 0;
+  player.image     = player.runImages[0];
+  player.walkTimer = player.WALK_TIMER;
+  player.y         = player.groundY;
+}
+
+function setupReset() {
+  if (!restartReady) {
+    restartReady = true;
+    setTimeout(() => {
+      window.addEventListener("keyup",      reset, { once: true });
+      window.addEventListener("touchstart", reset, { once: true });
+    }, 1000);
+  }
+}
+
+let resetLockout = false; // prevents the start-clap from also triggering a jump
+
+// Clap wiring
+function handleClap() {
+  if (waiting || gameOver) {
+    reset();
+    // Lock out jump triggers for 600ms so the start clap doesn't also jump
+    resetLockout = true;
+    setTimeout(() => { resetLockout = false; }, 600);
+    return;
+  }
+  if (resetLockout) return;
+  player.triggerJump();
+}
+function handleDoubleClap() {
+  if (waiting || gameOver) {
+    reset();
+    resetLockout = true;
+    setTimeout(() => { resetLockout = false; }, 600);
+    return;
+  }
+  if (resetLockout) return;
+  player.triggerJump();  // triggerJump already checks jumpsUsed < MAX_JUMPS
+}
+
+new ClapDetector(document.getElementById("cam-video"), handleClap, handleDoubleClap);
+
+// =============================================================================
+// GAME LOOP
+// =============================================================================
+function gameLoop(now) {
+  if (prevTime === null) { prevTime = now; requestAnimationFrame(gameLoop); return; }
+  const dt = Math.min(now - prevTime, 50);
+  prevTime  = now;
+
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (!gameOver && !waiting) {
+    ground.update(gameSpeed, dt);
+    obstacles.update(gameSpeed, dt);
+    player.update(gameSpeed, dt);   // only called when game is running
+    score.update(dt);
+    gameSpeed += dt * SPEED_INCREMENT;
+
+    if (obstacles.collideWith(player)) {
+      gameOver = true;
+      score.setHighScore();
+      setupReset();
+    }
+  }
+
+  ground.draw();
+  obstacles.draw();
+  player.draw();    // always draw player so it's visible on all screens
+  score.draw();
+
+  if (gameOver) {
+    ctx.font      = `${70 * scaleRatio}px Verdana`;
+    ctx.fillStyle = "grey";
+    ctx.fillText("GAME OVER", canvas.width / 4.5, canvas.height / 2);
+    ctx.font      = `${22 * scaleRatio}px Verdana`;
+    ctx.fillText("👏 Clap or Space to restart", canvas.width / 4, canvas.height / 1.4);
+  }
+
+  if (waiting) {
+    ctx.font      = `${30 * scaleRatio}px Verdana`;
+    ctx.fillStyle = "grey";
+    ctx.fillText("👏 Clap or Press Space To Start", canvas.width / 9, canvas.height / 2);
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+createSprites();
+window.addEventListener("resize", () => setTimeout(createSprites, 500));
+if (screen.orientation) screen.orientation.addEventListener("change", createSprites);
+
+requestAnimationFrame(gameLoop);
+window.addEventListener("keyup", reset, { once: true });
+    </script>
+  </body>
+</html>
