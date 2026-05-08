@@ -26,10 +26,8 @@
       #game-wrapper { position: relative; display: inline-block; }
       canvas#game   { border: 0.1px solid grey; display: block; }
 
-      /* hidden canvas used for motion detection — never shown */
       #motion-canvas { display: none; }
 
-      /* ── Camera preview ─────────────────────────────────── */
       #cam-box {
         position: absolute;
         top: 10px; left: 10px;
@@ -47,10 +45,8 @@
         transform: scaleX(-1);
         opacity: 0.92;
       }
-      #cam-box.clap-flash        { border-color: #ffdd00; box-shadow: 0 0 20px 5px rgba(255,220,0,0.9); }
-      #cam-box.double-clap-flash { border-color: #ff4400; box-shadow: 0 0 26px 7px rgba(255,68,0,0.95); }
+      #cam-box.clap-flash { border-color: #ffdd00; box-shadow: 0 0 20px 5px rgba(255,220,0,0.9); }
 
-      /* ── Status badge ───────────────────────────────────── */
       #clap-status {
         position: absolute;
         top: 134px; left: 10px;
@@ -65,7 +61,6 @@
         white-space: nowrap;
       }
 
-      /* ── Loading overlay ────────────────────────────────── */
       #cam-overlay {
         position: absolute;
         top: 10px; left: 10px;
@@ -162,13 +157,13 @@ class Obstacle {
   }
   draw() { this.ctx.drawImage(this.image, this.x, this.y, this.width, this.height); }
   collideWith(sprite) {
-  const adj = 1.4;
-  return (
-    sprite.x                    < this.x + this.width  / adj &&
-    sprite.x + sprite.width / adj > this.x                   &&
-    sprite.y                    < this.y + this.height / adj &&
-    sprite.y + sprite.height / adj > this.y                    // ← fixed
-  );
+    const adj = 1.4;
+    return (
+      sprite.x                      < this.x + this.width  / adj &&
+      sprite.x + sprite.width / adj > this.x                     &&
+      sprite.y                      < this.y + this.height / adj &&
+      sprite.y + sprite.height / adj > this.y
+    );
   }
 }
 
@@ -207,24 +202,24 @@ class ObstacleController {
 }
 
 // =============================================================================
-// PLAYER
-// Fix: image starts as runImages[0] — never stillImage.
-//      stillImage only shown while jumping===true.
-//      On game-over, player.update is NOT called so image stays frozen.
-//      r2 falls back to r1 if hammy.png is missing.
+// PLAYER  (fixed)
 // =============================================================================
 class Player {
-  WALK_TIMER  = 200;
-  walkTimer   = 200;
-  runImages   = [];
-  framIndex = 0;    // track animation by index instead of object reference
-  jumping     = false;
-  falling     = false;
-  jumpPressed = false;
-  JUMP_SPEED  = 0.9;
-  GRAVITY     = 0.4;
-  jumpsUsed   = 0;
-  MAX_JUMPS   = 2;
+  WALK_TIMER = 200;
+  walkTimer  = 200;
+  frameIndex = 0;
+  runImages  = [];
+
+  // --- jump state ---
+  // Single source of truth: the player can only jump when isOnGround() is true.
+  // We removed the old `jumping` + `falling` dual-flag system that allowed
+  // edge cases where both could be false simultaneously mid-air.
+  _airborne   = false;   // true the moment a jump begins, false only on landing
+  _falling    = false;   // true once upward momentum is exhausted
+  jumpPressed = false;   // held high while the jump input is active
+
+  JUMP_SPEED = 0.9;
+  GRAVITY    = 0.4;
 
   constructor(ctx, width, height, minJump, maxJump, scaleRatio) {
     this.ctx = ctx; this.canvas = ctx.canvas;
@@ -234,101 +229,134 @@ class Player {
 
     this.x       = 10 * scaleRatio;
     this.y       = this.canvas.height - this.height - 1.5 * scaleRatio;
-    this.groundY = this.y;
+    this.groundY = this.y;  // cache landing Y; recalculated in reset() after resize
 
-    this.stillImage = null; // will be set once loaded; falls back to runImages[0] if missing
+    this.stillImage  = null;
+    this._lastJumpAt = 0;
 
     const r1 = new Image();
     r1.src = IMAGES.shyawn;
 
     const r2 = new Image();
-    this.runImages = [r1, r2];
     r2.onerror = () => {
-        const fallback = new Image();
-        fallback.src = IMAGES.shyawn;          // reload shyawn.png fresh
-        this.runImages[1] = fallback;          // independent object, same src
-        };
+      // BUG 1 FIX (partial): if hammy.png fails, slot 1 mirrors slot 0 so
+      // draw() always has a valid image at both frame indices.
+      const fallback = new Image();
+      fallback.src = IMAGES.shyawn;
+      this.runImages[1] = fallback;
+    };
     r2.src = IMAGES.shyawn_run2;
+    this.runImages = [r1, r2];
 
-    // Load still separately; if it fails we just use runImages[0] for airborne too
     const still = new Image();
     still.onload = () => { this.stillImage = still; };
     still.src = IMAGES.still;
 
     this.image = this.runImages[0];
 
-    // Space bar fallback
-    this._kd = e => { if (e.code === "Space") this.triggerJump(); };
-    window.removeEventListener("keydown", this._kd);
+    // Space: start jump on keydown, release jumpPressed on keyup.
+    // BUG 2 FIX: the old code released jumpPressed via setTimeout(220ms) which
+    // could fire while the player was still rising, truncating the jump.
+    // Tying release to keyup lets the player control jump height naturally.
+    this._kd = e => { if (e.code === "Space") { this.triggerJump(); } };
+    this._ku = e => { if (e.code === "Space") { this.jumpPressed = false; } };
     window.addEventListener("keydown", this._kd);
+    window.addEventListener("keyup",   this._ku);
+  }
+
+  // BUG 3 FIX: isOnGround() is the single authoritative guard for jump eligibility.
+  // The old code checked `if (!this.jumping)` but `jumping` was cleared at the
+  // bottom of the falling branch — before y fully settled — letting a second
+  // clap/space slip in on the same frame and start a mid-air jump.
+  isOnGround() {
+    return !this._airborne && Math.abs(this.y - this.groundY) < 2;
   }
 
   triggerJump() {
-  const now = performance.now();
-  if (this._lastJumpAt && now - this._lastJumpAt < 150) return;  // ← debounce
-  this._lastJumpAt = now;
+    const now = performance.now();
+    if (now - this._lastJumpAt < 150) return;  // debounce rapid inputs
+    this._lastJumpAt = now;
 
-  if (this.jumpsUsed < this.MAX_JUMPS) {
-    this.jumpsUsed++;
-    this.jumping     = true;
-    this.falling     = false;
+    // BUG 3 FIX: only allow a jump when actually standing on the ground.
+    if (!this.isOnGround()) return;
+
+    this._airborne   = true;
+    this._falling    = false;
     this.jumpPressed = true;
-    clearTimeout(this._rel);
-    this._rel = setTimeout(() => { this.jumpPressed = false; }, 220);
+    // No setTimeout here (was Bug 2). jumpPressed is cleared on keyup / clap release.
   }
-}
+
+  // Called by ClapDetector when a clap ends, so jumpPressed doesn't stay
+  // latched forever (mirrors keyup for the keyboard path).
+  releaseJump() {
+    this.jumpPressed = false;
+  }
 
   update(gameSpeed, dt) {
-  if (!this.jumping) {
-  this.walkTimer -= dt;   // ← remove * gameSpeed
-  if (this.walkTimer <= 0) {
-    this.frameIndex = (this.frameIndex === 0) ? 1 : 0;
-    this.walkTimer  = this.WALK_TIMER;
-  }
-  this.image = this.runImages[this.frameIndex];
-} else {
-  this.image = (this.stillImage && this.stillImage.complete && this.stillImage.naturalWidth > 0)
-    ? this.stillImage
-    : this.runImages[0];
-}
-
-  if (this.jumping && !this.falling) {
-  if (
-    this.y > this.canvas.height - this.minJump ||
-    (this.y > this.canvas.height - this.maxJump && this.jumpPressed)
-  ) {
-    this.y -= this.JUMP_SPEED * dt * this.scaleRatio;
-    if (this.y < 0) {          // ← add this clamp
-      this.y = 0;
-      this.falling = true;     // immediately start falling back down
-    }
-  } else {
-    this.falling = true;
-  }
-  } else {
-    if (this.y < this.groundY) {
-      this.y += this.GRAVITY * dt * this.scaleRatio;
-      if (this.y + this.height > this.canvas.height) this.y = this.groundY;
+    // --- animation frame ---
+    if (!this._airborne) {
+      // Walk cycle only while grounded.
+      this.walkTimer -= dt;
+      if (this.walkTimer <= 0) {
+        this.frameIndex = this.frameIndex === 0 ? 1 : 0;
+        this.walkTimer  = this.WALK_TIMER;
+      }
+      this.image = this.runImages[this.frameIndex];
     } else {
-        this.falling    = false;
-        this.jumping    = false;
-        this.jumpsUsed  = 0;
-        this.frameIndex = 0;              // ← reset index on landing
+      // Use still/airborne sprite. BUG 1 FIX: fall back to run frame 0 if
+      // still.png hasn't loaded yet, rather than leaving this.image stale.
+      const stillOk = this.stillImage &&
+                      this.stillImage.complete &&
+                      this.stillImage.naturalWidth > 0;
+      this.image = stillOk ? this.stillImage : this.runImages[0];
+    }
+
+    // --- physics ---
+    if (this._airborne && !this._falling) {
+      // Rising phase: keep going up while we haven't hit minJump OR while
+      // the jump button is held and we haven't hit maxJump.
+      const aboveMin = this.y <= this.canvas.height - this.minJump;
+      const aboveMax = this.y <= this.canvas.height - this.maxJump;
+
+      if (!aboveMin || (!aboveMax && this.jumpPressed)) {
+        this.y -= this.JUMP_SPEED * dt * this.scaleRatio;
+        // Clamp to canvas top.
+        if (this.y < 0) { this.y = 0; this._falling = true; }
+      } else {
+        // Minimum height reached and button released (or max height reached).
+        this._falling = true;
+      }
+    } else if (this._airborne && this._falling) {
+      // Falling phase: apply gravity.
+      this.y += this.GRAVITY * dt * this.scaleRatio;
+
+      // BUG 1 FIX: use >= so an overshoot (large dt spike) still lands cleanly.
+      // The old `this.y < this.groundY` guard could become false on overshoot,
+      // skipping the landing branch and leaving the player stuck mid-air with
+      // _airborne=true and the walk cycle never resuming — making them vanish.
+      if (this.y >= this.groundY) {
+        this.y        = this.groundY;  // snap to ground, no float
+        this._airborne = false;
+        this._falling  = false;
+        this.frameIndex = 0;
         this.image      = this.runImages[0];
         this.walkTimer  = this.WALK_TIMER;
-}
+      }
     }
   }
 
   draw() {
-  const safe = (img) => img && img.complete && img.naturalWidth > 0;
-  let img = safe(this.image) ? this.image : null;
-  if (!img) img = safe(this.runImages[0]) ? this.runImages[0] : null;
-  if (!img) img = safe(this.runImages[1]) ? this.runImages[1] : null;
-  if (img) this.ctx.drawImage(img, this.x, this.y, this.width, this.height);
+    // BUG 1 FIX: robust image selection. Prefer this.image, then run frame 0,
+    // then run frame 1. If all three are unloaded, skip the draw silently
+    // rather than throwing — the player will reappear next frame once loaded.
+    const ok  = img => img && img.complete && img.naturalWidth > 0;
+    const img = ok(this.image)        ? this.image
+              : ok(this.runImages[0]) ? this.runImages[0]
+              : ok(this.runImages[1]) ? this.runImages[1]
+              : null;
+    if (img) this.ctx.drawImage(img, this.x, this.y, this.width, this.height);
+  }
 }
-}
-
 // =============================================================================
 // SCORE
 // =============================================================================
@@ -359,44 +387,29 @@ class Score {
 }
 
 // =============================================================================
-// CLAP DETECTOR — pure motion detection, no ML library needed
-//
-// How it works:
-//   Every 50ms, the camera feed is drawn into a tiny 80×60 canvas.
-//   We compare each pixel's brightness to the previous frame.
-//   If enough pixels changed significantly (DIFF_THRESHOLD), that's motion.
-//   A clap = a sudden large motion burst AFTER a period of low motion.
-//   (hands go apart = calm, hands slam together = big motion spike)
-//
-//   MOTION_THRESHOLD  : fraction of pixels that must change to count as motion
-//   SPIKE_MULTIPLIER  : current motion must be this many times the recent avg
-//   COOLDOWN_MS       : min time between claps
-//   DOUBLE_WINDOW_MS  : two spikes this close = double clap
+// CLAP DETECTOR
 // =============================================================================
 class ClapDetector {
-  MOTION_THRESHOLD = 0.08;   // 8% of pixels changed = motion frame
-  SPIKE_MULTIPLIER = 2.5;    // spike must be 2.5x recent average to trigger
+  MOTION_THRESHOLD = 0.08;
+  SPIKE_MULTIPLIER = 2.5;
   COOLDOWN_MS      = 600;
-  DOUBLE_WINDOW_MS = 700;
-  SAMPLE_INTERVAL  = 50;     // ms between frames sampled (20fps)
-  HISTORY_LEN      = 6;      // frames of history to compute rolling average
+  SAMPLE_INTERVAL  = 50;
+  HISTORY_LEN      = 6;
 
-  constructor(videoEl, onClap, onDoubleClap) {
-    this.video        = videoEl;
-    this.onClap       = onClap;
-    this.onDoubleClap = onDoubleClap;
+  constructor(videoEl, onClap) {
+    this.video  = videoEl;
+    this.onClap = onClap;
 
     this.motionCanvas = document.getElementById("motion-canvas");
     this.motionCtx    = this.motionCanvas.getContext("2d", { willReadFrequently: true });
-    this.W = this.motionCanvas.width;   // 80
-    this.H = this.motionCanvas.height;  // 60
+    this.W = this.motionCanvas.width;
+    this.H = this.motionCanvas.height;
 
-    this.prevPixels   = null;
+    this.prevPixels    = null;
     this.motionHistory = [];
-    this.lastClapAt   = 0;
-    this.lastSingleAt = 0;
-    this.prevWasLow   = false;
-    this.warmup       = true; // ignore motion during camera startup
+    this.lastClapAt    = 0;
+    this.prevWasLow    = false;
+    this.warmup        = true;
 
     this._start();
   }
@@ -410,13 +423,9 @@ class ClapDetector {
       await this.video.play();
 
       document.getElementById("cam-overlay").classList.add("hidden");
-      document.getElementById("clap-status").textContent =
-        "👏 Clap to jump  |  👏👏 Double clap = double jump";
+      document.getElementById("clap-status").textContent = "👏 Clap to jump";
 
-      // Ignore motion for 1.5s while camera exposure/white-balance settles
       setTimeout(() => { this.warmup = false; }, 1500);
-
-      // Sample camera at SAMPLE_INTERVAL using setInterval (reliable timing)
       setInterval(() => this._sample(), this.SAMPLE_INTERVAL);
 
     } catch (err) {
@@ -429,7 +438,6 @@ class ClapDetector {
   _sample() {
     if (this.video.readyState < 2) return;
 
-    // Draw current frame into tiny canvas
     this.motionCtx.drawImage(this.video, 0, 0, this.W, this.H);
     const data = this.motionCtx.getImageData(0, 0, this.W, this.H).data;
 
@@ -438,7 +446,6 @@ class ClapDetector {
       return;
     }
 
-    // Count changed pixels (compare brightness only)
     let changed = 0;
     const total = this.W * this.H;
     for (let i = 0; i < data.length; i += 4) {
@@ -448,34 +455,23 @@ class ClapDetector {
     }
     this.prevPixels = data.slice();
 
-    const motionLevel = changed / total; // 0.0 – 1.0
+    const motionLevel = changed / total;
 
-    // Rolling average of recent frames
     this.motionHistory.push(motionLevel);
     if (this.motionHistory.length > this.HISTORY_LEN) this.motionHistory.shift();
     const avg = this.motionHistory.reduce((a, b) => a + b, 0) / this.motionHistory.length;
 
-    const now   = performance.now();
+    const now    = performance.now();
     const isHigh = motionLevel > this.MOTION_THRESHOLD &&
                    motionLevel > avg * this.SPIKE_MULTIPLIER;
     const isLow  = motionLevel < this.MOTION_THRESHOLD * 0.5;
 
-    // Fire on the rising edge of a spike that follows a calm period
     if (!this.warmup && isHigh && this.prevWasLow) {
       if (now - this.lastClapAt > this.COOLDOWN_MS) {
         this.lastClapAt = now;
-
-        if (now - this.lastSingleAt < this.DOUBLE_WINDOW_MS) {
-          this.lastSingleAt = 0;
-          this.onDoubleClap();
-          this._flash("double");
-          this._status("👏👏 DOUBLE JUMP!");
-        } else {
-          this.lastSingleAt = now;
-          this.onClap();
-          this._flash("single");
-          this._status("👏 JUMP!");
-        }
+        this.onClap();
+        this._flash();
+        this._status("👏 JUMP!");
       }
     }
 
@@ -483,20 +479,18 @@ class ClapDetector {
     if (isHigh) this.prevWasLow = false;
   }
 
-  _flash(type) {
+  _flash() {
     const box = document.getElementById("cam-box");
-    box.classList.remove("clap-flash", "double-clap-flash");
-    box.classList.add(type === "double" ? "double-clap-flash" : "clap-flash");
+    box.classList.add("clap-flash");
     clearTimeout(this._ft);
-    this._ft = setTimeout(() => box.classList.remove("clap-flash", "double-clap-flash"), 250);
+    this._ft = setTimeout(() => box.classList.remove("clap-flash"), 250);
   }
 
   _status(msg) {
     document.getElementById("clap-status").textContent = msg;
     clearTimeout(this._st);
     this._st = setTimeout(() => {
-      document.getElementById("clap-status").textContent =
-        "👏 Clap to jump  |  👏👏 Double clap = double jump";
+      document.getElementById("clap-status").textContent = "👏 Clap to jump";
     }, 600);
   }
 }
@@ -533,6 +527,7 @@ let gameSpeed    = SPEED_START;
 let gameOver     = false;
 let waiting      = true;
 let restartReady = false;
+let resetLockout = false;
 
 function getScaleRatio() {
   const sw = Math.min(window.innerWidth,  document.documentElement.clientWidth);
@@ -570,7 +565,6 @@ function reset() {
   score.reset();
   gameSpeed = SPEED_START;
 
-  // Clean up old player's keyboard listener before replacing it
   if (player && player._kd) {
     window.removeEventListener("keydown", player._kd);
   }
@@ -593,32 +587,46 @@ function setupReset() {
   }
 }
 
-let resetLockout = false; // prevents the start-clap from also triggering a jump
-
-// Clap wiring
 function handleClap() {
   if (waiting || gameOver) {
     reset();
-    // Lock out jump triggers for 600ms so the start clap doesn't also jump
     resetLockout = true;
     setTimeout(() => { resetLockout = false; }, 600);
     return;
   }
   if (resetLockout) return;
   player.triggerJump();
-}
-function handleDoubleClap() {
-  if (waiting || gameOver) {
-    reset();
-    resetLockout = true;
-    setTimeout(() => { resetLockout = false; }, 600);
-    return;
-  }
-  if (resetLockout) return;
-  player.triggerJump();  // triggerJump already checks jumpsUsed < MAX_JUMPS
+
+  // BUG 2 FIX: release jumpPressed after a short delay for clap inputs,
+  // since there's no "keyup" equivalent. 300ms is long enough to clear
+  // the minJump threshold on a normal jump without cutting it short.
+  setTimeout(() => player.releaseJump(), 300);
 }
 
-new ClapDetector(document.getElementById("cam-video"), handleClap, handleDoubleClap);
+function reset() {
+  restartReady = false;
+  gameOver     = false;
+  waiting      = false;
+  ground.reset();
+  obstacles.reset();
+  score.reset();
+  gameSpeed = SPEED_START;
+
+  // Clean up both keydown AND keyup listeners from the old player instance.
+  if (player) {
+    if (player._kd) window.removeEventListener("keydown", player._kd);
+    if (player._ku) window.removeEventListener("keyup",   player._ku);  // ← was missing
+  }
+
+  player = new Player(
+    ctx,
+    PLAYER_W * scaleRatio, PLAYER_H * scaleRatio,
+    MIN_JUMP * scaleRatio, MAX_JUMP * scaleRatio,
+    scaleRatio
+  );
+}
+
+new ClapDetector(document.getElementById("cam-video"), handleClap);
 
 // =============================================================================
 // GAME LOOP
@@ -634,7 +642,7 @@ function gameLoop(now) {
   if (!gameOver && !waiting) {
     ground.update(gameSpeed, dt);
     obstacles.update(gameSpeed, dt);
-    player.update(gameSpeed, dt);   // only called when game is running
+    player.update(gameSpeed, dt);
     score.update(dt);
     gameSpeed += dt * SPEED_INCREMENT;
 
@@ -647,7 +655,7 @@ function gameLoop(now) {
 
   ground.draw();
   obstacles.draw();
-  player.draw();    // always draw player so it's visible on all screens
+  player.draw();
   score.draw();
 
   if (gameOver) {
